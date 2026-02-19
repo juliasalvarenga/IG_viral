@@ -1,0 +1,17 @@
+.env
+credentials.json
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+*.log
+audio_cache/
+output/
+*.mp3
+*.mp4
+*.wav
+*.m4a
