@@ -1,12 +1,29 @@
 # IG Viral Scripter
 
-Automatically pull top-performing Instagram reels, transcribe them, extract what makes them go viral, and generate original scripts for your own content — all from one command.
+Automatically pull top-performing Instagram reels, transcribe them, extract what makes them go viral, and generate original scripts for your own content.
 
-**Free stack — no paid API keys required.**
+**Free stack — no paid API keys required. Runs as a web app on Streamlit Cloud.**
 
 ```
-Scrape (instaloader) → Download audio (yt-dlp) → Transcribe (local Whisper) → Analyse (Groq) → Generate scripts (Groq)
+Scrape (instaloader) → Download audio (yt-dlp) → Transcribe (Groq Whisper) → Analyse (Groq LLM) → Generate scripts (Groq LLM)
 ```
+
+---
+
+## Deploy to Streamlit Cloud (free, 2 minutes)
+
+1. Fork this repo to your GitHub account
+2. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub
+3. Click **New app** → select your fork → set **Main file path** to `app.py`
+4. Click **Advanced settings → Secrets** and paste:
+   ```toml
+   GROQ_API_KEY = "gsk_your_key_here"
+   IG_USERNAME = "your_ig_username"
+   IG_PASSWORD = "your_ig_password"
+   ```
+5. Click **Deploy** — your app will be live at `https://yourname-ig-viral-app-xxxx.streamlit.app`
+
+Get your free Groq key at [console.groq.com](https://console.groq.com) → API Keys.
 
 ---
 
