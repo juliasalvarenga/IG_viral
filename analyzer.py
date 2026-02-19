@@ -1,5 +1,8 @@
 """
-Content analysis powered by Claude.
+Content analysis powered by Groq (free tier LLM).
+
+Free account: https://console.groq.com
+Default model: llama-3.3-70b-versatile (fast, high quality, generous free limits)
 
 Reads a batch of reel transcripts and metadata, then produces a structured
 breakdown of:
@@ -14,7 +17,7 @@ from __future__ import annotations
 
 import json
 
-import anthropic
+from groq import Groq
 from rich.console import Console
 
 import config
@@ -22,14 +25,30 @@ from scraper import ReelData
 
 console = Console()
 
-_client: anthropic.Anthropic | None = None
+_client: Groq | None = None
 
 
-def _get_client() -> anthropic.Anthropic:
+def _get_client() -> Groq:
     global _client
     if _client is None:
-        _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        _client = Groq(api_key=config.GROQ_API_KEY)
     return _client
+
+
+def _chat(prompt: str, max_tokens: int = 1024) -> str | None:
+    """Send a prompt to Groq and return the response text."""
+    try:
+        client = _get_client()
+        response = client.chat.completions.create(
+            model=config.GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            temperature=0.4,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as exc:
+        console.print(f"  [red]Groq API error:[/] {exc}")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -79,20 +98,20 @@ def analyse_reel(reel: ReelData) -> dict | None:
         transcript=reel.transcript[:4000],
     )
 
+    raw = _chat(prompt, max_tokens=1024)
+    if not raw:
+        return None
+
+    # Strip markdown fences if the model included them despite instructions
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+
     try:
-        client = _get_client()
-        message = client.messages.create(
-            model=config.CLAUDE_MODEL,
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = message.content[0].text.strip()
         return json.loads(raw)
     except json.JSONDecodeError as exc:
         console.print(f"  [red]JSON parse error for {reel.shortcode}:[/] {exc}")
-        return None
-    except anthropic.APIError as exc:
-        console.print(f"  [red]Claude API error for {reel.shortcode}:[/] {exc}")
         return None
 
 
@@ -125,7 +144,7 @@ MASTER STRATEGY document returned as a JSON object with these keys:
 Individual analyses:
 {analyses_json}
 
-Return ONLY the JSON object.
+Return ONLY the JSON object. No markdown fences, no extra text.
 """
 
 
@@ -134,7 +153,7 @@ def analyse_batch(reels: list[ReelData], niche: str = "general") -> dict | None:
     Perform per-reel analysis on all reels that have transcripts, then
     synthesise a master strategy. Returns the aggregate analysis dict.
     """
-    console.print(f"\n[bold magenta]Analysing {len(reels)} reels with Claude…[/]")
+    console.print(f"\n[bold magenta]Analysing {len(reels)} reels with Groq ({config.GROQ_MODEL})…[/]")
 
     per_reel_results = []
     for i, reel in enumerate(reels, 1):
@@ -158,20 +177,19 @@ def analyse_batch(reels: list[ReelData], niche: str = "general") -> dict | None:
         analyses_json=json.dumps(per_reel_results, indent=2)[:12000],
     )
 
+    raw = _chat(prompt, max_tokens=2048)
+    if not raw:
+        return None
+
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+
     try:
-        client = _get_client()
-        message = client.messages.create(
-            model=config.CLAUDE_MODEL,
-            max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = message.content[0].text.strip()
         aggregate = json.loads(raw)
         console.print("[green]Master strategy complete.[/]")
         return aggregate
     except json.JSONDecodeError as exc:
         console.print(f"[red]JSON parse error in aggregate analysis:[/] {exc}")
-        return None
-    except anthropic.APIError as exc:
-        console.print(f"[red]Claude API error in aggregate analysis:[/] {exc}")
         return None

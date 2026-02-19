@@ -1,9 +1,12 @@
 """
-Instagram scraper powered by Apify.
+Instagram scraper using instaloader (no paid API required).
 
-Pulls top-performing reels from hashtags or profile URLs, filtered by
-minimum view count. Returns structured ReelData objects ready for
-downstream processing.
+Logs in with your Instagram credentials (stored in .env) to avoid
+aggressive rate-limiting on anonymous requests.  Falls back to anonymous
+access if credentials are not provided, but expect more throttling.
+
+Pulls top-performing reels from hashtags or profile usernames, filtered by
+minimum view count.  Returns structured ReelData objects.
 """
 
 from __future__ import annotations
@@ -12,17 +15,53 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from apify_client import ApifyClient
+import instaloader
 from rich.console import Console
 
 import config
 
 console = Console()
 
+# Instaloader instance (shared, login happens once)
+_loader: instaloader.Instaloader | None = None
+
+
+def _get_loader() -> instaloader.Instaloader:
+    global _loader
+    if _loader is not None:
+        return _loader
+
+    L = instaloader.Instaloader(
+        download_videos=False,
+        download_video_thumbnails=False,
+        download_geotags=False,
+        download_comments=False,
+        save_metadata=False,
+        compress_json=False,
+        quiet=True,
+    )
+
+    if config.IG_USERNAME and config.IG_PASSWORD:
+        try:
+            L.login(config.IG_USERNAME, config.IG_PASSWORD)
+            console.print(f"[green]Logged in to Instagram as @{config.IG_USERNAME}[/]")
+        except instaloader.exceptions.BadCredentialsException:
+            console.print("[red]Instagram login failed — bad credentials. Falling back to anonymous.[/]")
+        except instaloader.exceptions.TwoFactorAuthRequiredException:
+            console.print(
+                "[yellow]Two-factor auth required.[/] Disable 2FA on your scraper account "
+                "or log in once manually with: [bold]instaloader --login <username>[/]"
+            )
+    else:
+        console.print("[yellow]No IG credentials set — using anonymous access (more rate-limiting).[/]")
+
+    _loader = L
+    return L
+
 
 @dataclass
 class ReelData:
-    """Metadata for a single Instagram reel."""
+    """Metadata for a single Instagram reel / video post."""
 
     shortcode: str
     url: str
@@ -38,30 +77,22 @@ class ReelData:
     analysis: Optional[dict] = None
 
 
-def _parse_reel(item: dict) -> Optional[ReelData]:
-    """Convert a raw Apify result item into a ReelData object."""
-    # Apify's instagram-scraper returns slightly different fields depending
-    # on the run type; we handle both post-level and reel-level results.
-    video_url = item.get("videoUrl") or item.get("video_url")
-    views = item.get("videoViewCount") or item.get("videoPlayCount") or 0
-
-    if not video_url:
-        return None  # skip non-video posts
-
-    shortcode = item.get("shortCode") or item.get("id", "")
-    post_url = item.get("url") or f"https://www.instagram.com/reel/{shortcode}/"
+def _post_to_reel(post: instaloader.Post) -> Optional[ReelData]:
+    """Convert an instaloader Post to a ReelData object."""
+    if not post.is_video:
+        return None
 
     return ReelData(
-        shortcode=shortcode,
-        url=post_url,
-        video_url=video_url,
-        caption=item.get("caption") or item.get("text") or "",
-        views=int(views),
-        likes=int(item.get("likesCount") or item.get("likes") or 0),
-        comments=int(item.get("commentsCount") or item.get("comments") or 0),
-        owner_username=item.get("ownerUsername") or item.get("username") or "",
-        timestamp=str(item.get("timestamp") or item.get("taken_at") or ""),
-        hashtags=item.get("hashtags") or [],
+        shortcode=post.shortcode,
+        url=f"https://www.instagram.com/reel/{post.shortcode}/",
+        video_url=post.video_url,
+        caption=post.caption or "",
+        views=post.video_view_count or 0,
+        likes=post.likes,
+        comments=post.comments,
+        owner_username=post.owner_username,
+        timestamp=str(post.date_utc),
+        hashtags=list(post.caption_hashtags),
     )
 
 
@@ -71,78 +102,91 @@ def scrape_by_hashtag(
     min_views: int = config.MIN_VIEWS,
 ) -> list[ReelData]:
     """
-    Scrape reels for a given hashtag and return those that meet the view
+    Scrape video posts for a hashtag and return those meeting the view
     threshold, sorted by view count descending.
     """
-    client = ApifyClient(config.APIFY_API_TOKEN)
+    L = _get_loader()
     clean_tag = hashtag.lstrip("#")
-
     console.print(f"[bold cyan]Scraping hashtag:[/] #{clean_tag} (min views: {min_views:,})")
 
-    run_input = {
-        "hashtags": [clean_tag],
-        "resultsLimit": max_results * 3,  # over-fetch so we have enough after filtering
-        "scrapeType": "posts",
-        "isUserReelFeedURL": False,
-        "addParentData": False,
-    }
+    try:
+        tag = instaloader.Hashtag.from_name(L.context, clean_tag)
+    except instaloader.exceptions.QueryReturnedNotFoundException:
+        console.print(f"  [red]Hashtag #{clean_tag} not found.[/]")
+        return []
 
-    run = client.actor(config.APIFY_INSTAGRAM_SCRAPER_ACTOR).call(run_input=run_input)
-    items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+    reels: list[ReelData] = []
+    fetched = 0
+    limit = max_results * 5  # over-fetch to get enough videos after filtering
 
-    reels = []
-    for item in items:
-        reel = _parse_reel(item)
-        if reel and reel.views >= min_views:
-            reels.append(reel)
+    try:
+        for post in tag.get_posts():
+            if fetched >= limit:
+                break
+            fetched += 1
+
+            reel = _post_to_reel(post)
+            if reel and reel.views >= min_views:
+                reels.append(reel)
+
+            # Brief pause to respect rate limits
+            if fetched % 10 == 0:
+                time.sleep(2)
+    except instaloader.exceptions.TooManyRequestsException:
+        console.print(f"  [yellow]Rate limited by Instagram after {fetched} posts. Using what we have.[/]")
 
     reels.sort(key=lambda r: r.views, reverse=True)
     top = reels[:max_results]
-
     console.print(f"  [green]Found {len(top)} qualifying reels[/] from #{clean_tag}")
     return top
 
 
 def scrape_by_profile(
-    profile_url_or_username: str,
+    username_or_url: str,
     max_results: int = config.MAX_REELS_PER_TARGET,
     min_views: int = config.MIN_VIEWS,
 ) -> list[ReelData]:
     """
-    Scrape reels from a specific Instagram profile and return those that
-    meet the view threshold, sorted by view count descending.
+    Scrape video posts from a specific Instagram profile.
+    Accepts a bare username, @username, or a full profile URL.
     """
-    client = ApifyClient(config.APIFY_API_TOKEN)
+    L = _get_loader()
 
-    # Normalise: accept both a username and a full profile URL
-    if profile_url_or_username.startswith("http"):
-        target_url = profile_url_or_username
-        username = profile_url_or_username.rstrip("/").split("/")[-1]
+    # Normalise input
+    if username_or_url.startswith("http"):
+        username = username_or_url.rstrip("/").split("/")[-1]
     else:
-        username = profile_url_or_username.lstrip("@")
-        target_url = f"https://www.instagram.com/{username}/"
+        username = username_or_url.lstrip("@")
 
     console.print(f"[bold cyan]Scraping profile:[/] @{username} (min views: {min_views:,})")
 
-    run_input = {
-        "directUrls": [target_url],
-        "resultsType": "posts",
-        "resultsLimit": max_results * 3,
-        "addParentData": False,
-    }
+    try:
+        profile = instaloader.Profile.from_username(L.context, username)
+    except instaloader.exceptions.ProfileNotExistsException:
+        console.print(f"  [red]Profile @{username} not found.[/]")
+        return []
 
-    run = client.actor(config.APIFY_INSTAGRAM_SCRAPER_ACTOR).call(run_input=run_input)
-    items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+    reels: list[ReelData] = []
+    fetched = 0
+    limit = max_results * 5
 
-    reels = []
-    for item in items:
-        reel = _parse_reel(item)
-        if reel and reel.views >= min_views:
-            reels.append(reel)
+    try:
+        for post in profile.get_posts():
+            if fetched >= limit:
+                break
+            fetched += 1
+
+            reel = _post_to_reel(post)
+            if reel and reel.views >= min_views:
+                reels.append(reel)
+
+            if fetched % 10 == 0:
+                time.sleep(2)
+    except instaloader.exceptions.TooManyRequestsException:
+        console.print(f"  [yellow]Rate limited by Instagram after {fetched} posts. Using what we have.[/]")
 
     reels.sort(key=lambda r: r.views, reverse=True)
     top = reels[:max_results]
-
     console.print(f"  [green]Found {len(top)} qualifying reels[/] from @{username}")
     return top
 
@@ -153,9 +197,8 @@ def scrape_targets(
     min_views: int = config.MIN_VIEWS,
 ) -> list[ReelData]:
     """
-    Accept a mixed list of hashtags (e.g. 'fitness') and profile handles /
-    URLs (e.g. '@garyvee' or 'https://www.instagram.com/garyvee/') and
-    return a de-duplicated, combined list of qualifying reels.
+    Accept a mixed list of hashtags and @profiles/URLs and return a
+    de-duplicated, combined list of qualifying reels sorted by views.
     """
     seen: set[str] = set()
     all_reels: list[ReelData] = []
@@ -179,7 +222,7 @@ def scrape_targets(
                 seen.add(reel.shortcode)
                 all_reels.append(reel)
 
-        time.sleep(1)  # be polite between Apify calls
+        time.sleep(3)  # pause between targets
 
     all_reels.sort(key=lambda r: r.views, reverse=True)
     return all_reels

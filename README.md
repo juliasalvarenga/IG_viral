@@ -2,30 +2,47 @@
 
 Automatically pull top-performing Instagram reels, transcribe them, extract what makes them go viral, and generate original scripts for your own content — all from one command.
 
+**Free stack — no paid API keys required.**
+
 ```
-Scrape (Apify) → Download audio (yt-dlp) → Transcribe (Whisper) → Analyse (Claude) → Generate scripts (Claude)
+Scrape (instaloader) → Download audio (yt-dlp) → Transcribe (local Whisper) → Analyse (Groq) → Generate scripts (Groq)
 ```
+
+---
+
+## Cost breakdown
+
+| Stage | Tool | Cost |
+|-------|------|------|
+| Scrape Instagram | instaloader + IG account | Free |
+| Download audio | yt-dlp | Free |
+| Transcribe | Local Whisper model | Free (runs on your machine) |
+| Analyse + generate | Groq free tier (Llama 3.3 70B) | Free |
+| Export to Sheets | Google Sheets API | Free |
+
+The only thing you need to sign up for is a **free Groq account** at [console.groq.com](https://console.groq.com).
 
 ---
 
 ## How It Works
 
-| Stage | Tool | What happens |
-|-------|------|--------------|
-| 1. Scrape | Apify Instagram Scraper | Pulls top reels for your hashtags / competitor profiles, filtered by view count |
-| 2. Download | yt-dlp | Downloads the audio track from each reel |
-| 3. Transcribe | OpenAI Whisper | Converts audio to text |
-| 4. Analyse | Claude | Extracts hook patterns, tone, storytelling structure, power words |
-| 5. Generate | Claude | Writes 10+ original scripts using the extracted strategy |
-| 6. Export | Files + Google Sheets | Saves everything to `output/` and optionally to a Google Sheet |
+| Stage | What happens |
+|-------|-------------|
+| 1. Scrape | instaloader pulls top video posts for your hashtags / competitor profiles |
+| 2. Download | yt-dlp downloads the audio track from each reel |
+| 3. Transcribe | Local Whisper model converts audio to text (no API call) |
+| 4. Analyse | Groq LLM extracts hook patterns, tone, storytelling structure, power words |
+| 5. Generate | Groq LLM writes 10+ original scripts using the extracted strategy |
+| 6. Export | Saves everything to `output/` and optionally to a Google Sheet |
 
 ---
 
 ## Prerequisites
 
 - Python 3.11+
-- `ffmpeg` installed and on your PATH (required by yt-dlp for audio conversion)
-- API keys for Apify, Anthropic, and OpenAI
+- `ffmpeg` on your PATH (required by yt-dlp for audio conversion)
+- An Instagram account (recommended — anonymous scraping gets rate-limited faster)
+- A free Groq account
 
 ### Install ffmpeg
 
@@ -50,26 +67,35 @@ winget install ffmpeg
 pip install -r requirements.txt
 ```
 
-### 2. Configure environment variables
+The first time you run transcription, the Whisper model weights (~74MB for `base`) will be downloaded automatically to `~/.cache/whisper/`. No action needed.
+
+### 2. Get a free Groq API key
+
+1. Go to [console.groq.com](https://console.groq.com) and create a free account.
+2. Under **API Keys**, create a new key and copy it.
+
+### 3. Configure environment variables
 
 ```bash
 cp .env.example .env
-# Edit .env and fill in your API keys
+# Open .env and fill in your values
 ```
 
-Required keys in `.env`:
+Minimum required in `.env`:
 
 ```
-APIFY_API_TOKEN=...      # https://console.apify.com/account/integrations
-ANTHROPIC_API_KEY=...    # https://console.anthropic.com/
-OPENAI_API_KEY=...       # https://platform.openai.com/api-keys
+GROQ_API_KEY=gsk_...          # your Groq key
+IG_USERNAME=your_username     # Instagram username (optional but recommended)
+IG_PASSWORD=your_password     # Instagram password (optional but recommended)
 ```
 
-### 3. (Optional) Google Sheets export
+> **Tip:** Use a separate "burner" Instagram account for scraping to protect your main account from rate-limiting.
 
-1. Create a Google Cloud service account and download the JSON credentials file.
-2. Share your target Google Sheet with the service account email.
-3. Set in `.env`:
+### 4. (Optional) Google Sheets export
+
+1. Create a Google Cloud service account and download the JSON credentials.
+2. Share your Google Sheet with the service account email (Editor role).
+3. Add to `.env`:
    ```
    GOOGLE_SERVICE_ACCOUNT_FILE=credentials.json
    GOOGLE_SHEET_ID=<sheet_id_from_url>
@@ -138,6 +164,20 @@ python main.py --targets fitness --niche fitness --force
 
 ---
 
+## Whisper model sizes
+
+Set `WHISPER_MODEL_SIZE` in `.env` to trade accuracy for speed:
+
+| Size | Accuracy | CPU speed | Download size |
+|------|----------|-----------|---------------|
+| `tiny` | Low | ~1x real-time | 39 MB |
+| `base` | Good | ~2-4x real-time | 74 MB — **default** |
+| `small` | Better | ~4-8x real-time | 244 MB |
+| `medium` | Near-API | Slow on CPU | 769 MB |
+| `large` | Best | GPU needed | 1550 MB |
+
+---
+
 ## Output
 
 All results are saved to the `output/` directory:
@@ -145,8 +185,8 @@ All results are saved to the `output/` directory:
 | File | Contents |
 |------|----------|
 | `reels_<niche>_<ts>.json` | Full reel metadata, transcripts, and per-reel analysis |
-| `strategy_<niche>_<ts>.json` | Aggregate niche strategy extracted by Claude |
-| `scripts_<niche>_<ts>.txt` | Human-readable scripts (one per section) |
+| `strategy_<niche>_<ts>.json` | Aggregate niche strategy |
+| `scripts_<niche>_<ts>.txt` | Human-readable scripts |
 | `scripts_<niche>_<ts>.json` | Machine-readable scripts (structured JSON) |
 
 Audio files are cached in `audio_cache/` and transcripts alongside them as `.txt` files. Repeat runs are fast.
@@ -159,11 +199,11 @@ Audio files are cached in `audio_cache/` and transcripts alongside them as `.txt
 IG_viral/
 ├── main.py              # CLI entry point (typer)
 ├── config.py            # Environment variable loading
-├── scraper.py           # Apify Instagram scraper integration
+├── scraper.py           # instaloader-based Instagram scraper
 ├── downloader.py        # yt-dlp audio downloader
-├── transcriber.py       # OpenAI Whisper transcription
-├── analyzer.py          # Claude content analysis (per-reel + aggregate)
-├── script_generator.py  # Claude script generation
+├── transcriber.py       # Local Whisper transcription
+├── analyzer.py          # Groq content analysis (per-reel + aggregate)
+├── script_generator.py  # Groq script generation
 ├── exporter.py          # File + Google Sheets export
 ├── requirements.txt
 ├── .env.example
@@ -195,9 +235,9 @@ Generate scripts from an existing strategy JSON without scraping.
 
 ---
 
-## Notes
+## Known limitations
 
-- Apify charges per actor run. Each call to `instagram-scraper` consumes platform credits. Monitor your usage at [console.apify.com](https://console.apify.com).
-- OpenAI Whisper is billed per audio-minute. Audio files are cached so each reel is only transcribed once.
-- Claude API calls are billed per token. Aggregate analysis on 20 reels typically uses ~15k–30k tokens.
-- This tool is intended for competitive research and content ideation. Use it responsibly and in accordance with Instagram's Terms of Service.
+- **Instagram rate-limiting:** instaloader can get temporarily blocked, especially without credentials or when scraping many posts. The tool adds polite delays and handles this gracefully. If blocked, wait ~1 hour and try again.
+- **View count availability:** Instagram doesn't always expose view counts on hashtag pages without login. Profile scraping is more reliable.
+- **Groq free tier limits:** Groq has generous free limits (tens of thousands of tokens/minute) but they exist. If you hit them, the tool will print an error and you can retry after a minute.
+- **Whisper on CPU:** Transcribing 20 reels with `base` takes roughly 5-15 minutes on CPU. Results are cached — subsequent runs are instant.

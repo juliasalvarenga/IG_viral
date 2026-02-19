@@ -1,5 +1,5 @@
 """
-Viral script generator powered by Claude.
+Viral script generator powered by Groq (free tier LLM).
 
 Uses the aggregate content analysis to generate a batch of original,
 high-performing video scripts tailored to the target niche.
@@ -10,20 +10,20 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-import anthropic
+from groq import Groq
 from rich.console import Console
 
 import config
 
 console = Console()
 
-_client: anthropic.Anthropic | None = None
+_client: Groq | None = None
 
 
-def _get_client() -> anthropic.Anthropic:
+def _get_client() -> Groq:
     global _client
     if _client is None:
-        _client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        _client = Groq(api_key=config.GROQ_API_KEY)
     return _client
 
 
@@ -104,7 +104,7 @@ def generate_scripts(
 
     Returns a list of GeneratedScript objects.
     """
-    console.print(f"\n[bold magenta]Generating {n} original scripts for niche '{niche}'…[/]")
+    console.print(f"\n[bold magenta]Generating {n} original scripts for niche '{niche}' via Groq ({config.GROQ_MODEL})…[/]")
 
     instructions = user_instructions or "No special instructions. Write for maximum virality."
 
@@ -117,18 +117,24 @@ def generate_scripts(
 
     try:
         client = _get_client()
-        message = client.messages.create(
-            model=config.CLAUDE_MODEL,
+        response = client.chat.completions.create(
+            model=config.GROQ_MODEL,
             max_tokens=8192,
+            temperature=0.7,
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = message.content[0].text.strip()
+        raw = response.choices[0].message.content.strip()
+        # Strip markdown fences if model included them
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
         items = json.loads(raw)
     except json.JSONDecodeError as exc:
         console.print(f"[red]JSON parse error in script generation:[/] {exc}")
         return []
-    except anthropic.APIError as exc:
-        console.print(f"[red]Claude API error in script generation:[/] {exc}")
+    except Exception as exc:
+        console.print(f"[red]Groq API error in script generation:[/] {exc}")
         return []
 
     scripts: list[GeneratedScript] = []
